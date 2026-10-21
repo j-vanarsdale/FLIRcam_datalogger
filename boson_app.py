@@ -231,7 +231,8 @@ class SegmentWriter:
         self.record_format = record_format
         self._agc = AutoGain()
         self.segment_duration = segment_duration
-        self.fps = 30.0                       # container rate; real times are in the CSV
+        self.fps = 30.0                       # container rate; set from the *measured* capture rate
+        self._fps_known = threading.Event()
         self.dropped = 0
         self._q: queue.Queue = queue.Queue(maxsize=WRITER_QUEUE_FRAMES)
         self._thread = threading.Thread(target=self._run, daemon=True, name="writer")
@@ -239,12 +240,17 @@ class SegmentWriter:
         self._csv = None
         self._dims = None
         self._frames = 0
-        self._seg_start = 0.0
+        self._seg_start_us = 0
         self._hold_until = 0.0
         os.makedirs(output_dir, exist_ok=True)
 
     def start(self):
         self._thread.start()
+
+    def set_fps(self, fps: float):
+        """Container frame rate for segments opened from now on (measured, not camera-reported)."""
+        self.fps = fps
+        self._fps_known.set()
 
     def put(self, payload: bytes, ts_us: int, width: int, height: int):
         try:
@@ -257,7 +263,8 @@ class SegmentWriter:
         self._thread.join(timeout=30)
 
     # -- internals ---------------------------------------------------------
-    def _open_segment(self, width, height):
+    def _open_segment(self, width, height, ts_us):
+        self._fps_known.wait(timeout=5)       # frames wait in the queue meanwhile
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         base = os.path.join(self.output_dir, f"{stamp}_boson")
         src = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo"]
@@ -277,7 +284,7 @@ class SegmentWriter:
         self._csv.write("frame,timestamp_us\n")
         self._dims = (width, height)
         self._frames = 0
-        self._seg_start = time.monotonic()
+        self._seg_start_us = ts_us
         log.info("New segment -> '%s%s' (%dx%d @ %.1f fps)", base, ext, width, height, self.fps)
 
     def _close_segment(self):
@@ -310,13 +317,13 @@ class SegmentWriter:
             if self._proc is not None and (
                 self._dims != (width, height)
                 or self._proc.poll() is not None
-                or time.monotonic() - self._seg_start >= self.segment_duration
+                or ts_us - self._seg_start_us >= self.segment_duration * 1_000_000
             ):
                 self._close_segment()
 
             try:
                 if self._proc is None:
-                    self._open_segment(width, height)
+                    self._open_segment(width, height, ts_us)
                 if self.record_format == "mp4":
                     frame = np.frombuffer(payload, dtype="<u2").reshape(height, width)
                     self._proc.stdin.write(to_8bit(frame, self._agc).tobytes())
@@ -350,8 +357,8 @@ def parse_args():
                    help="mp4: 8-bit auto-scaled H.264 (listed/playable in the dashboard). "
                         "ffv1: lossless raw 16-bit .mkv (analysis).")
     p.add_argument("--fps", type=float, default=60.0, metavar="FPS",
-                   help="Fallback frame rate for the video container if the camera "
-                        "doesn't report one (60 for Boson 640, 9 for export-restricted units).")
+                   help="Fallback container frame rate, only used if the measured capture "
+                        "rate is implausible (60 for Boson 640, 9 for export-restricted units).")
     p.add_argument("--serial-port", default=None, metavar="PORT",
                    help="Boson serial port (default: auto-detect).")
     p.add_argument("--video-device", type=int, default=None, metavar="N",
@@ -392,9 +399,10 @@ def main():
                 source.close()
                 stop.wait(5)
                 continue
-            fps = source.fps if 1.0 <= source.fps <= 200.0 else args.fps
-            writer.fps = fps
-            log.info("Capturing at %.1f fps.", fps)
+            # The fps a camera/driver *reports* is often wrong (e.g. 30 for a 60 Hz Boson),
+            # which makes recorded segments play back too long or too short. Measure it.
+            log.info("Camera reports %.1f fps; measuring the real rate …", source.fps)
+            meas_t0, meas_n = None, 0
 
             # --- capture loop ------------------------------------------------
             failures = 0
@@ -425,6 +433,22 @@ def main():
                 frames += 1
 
                 now = time.monotonic()
+                if meas_t0 is None:
+                    meas_t0, meas_n = now, 0
+                else:
+                    meas_n += 1
+                    el = now - meas_t0
+                    first = not writer._fps_known.is_set()
+                    if (first and meas_n >= 20) or el >= 5.0:
+                        fps = meas_n / el
+                        if not 1.0 <= fps <= 200.0:
+                            fps = args.fps
+                        writer.set_fps(fps)
+                        if first:
+                            log.info("Measured capture rate: %.2f fps (container rate for recordings).", fps)
+                        else:
+                            log.debug("Measured capture rate: %.2f fps", fps)
+                        meas_t0, meas_n = now, 0
                 if now - last_status >= STATUS_INTERVAL_S:
                     log.info("%.1f fps | %d frames | %d dropped | %s",
                              (frames - last_count) / (now - last_status),
