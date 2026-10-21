@@ -1,0 +1,129 @@
+{
+  "name": "flir-boson-datalogger",
+  "version": "0.1.0",
+  "description": "FLIR Boson thermal camera datalogger (segmented MP4 recording) with an MJPEG live-stream server. Uses flirpy.",
+  "dependencies": {
+    "apt": [
+      "ffmpeg",
+      "libusb-1.0-0"
+    ],
+    "system_site_packages": false
+  },
+  "recordings_subdir": "boson",
+  "arguments": [
+    {
+      "name": "segment_duration",
+      "flag": "--segment-duration",
+      "type": "int",
+      "default": 60,
+      "required": false,
+      "description": "Length of each recorded segment in seconds."
+    },
+    {
+      "name": "record_format",
+      "flag": "--record-format",
+      "type": "str",
+      "default": "mp4",
+      "required": false,
+      "description": "mp4 = 8-bit auto-scaled H.264, listed/playable in the dashboard. ffv1 = lossless raw 16-bit .mkv for analysis (not listed in the dashboard by default)."
+    },
+    {
+      "name": "stream_quality",
+      "flag": "--quality",
+      "type": "int",
+      "default": 70,
+      "required": false,
+      "description": "Initial JPEG quality for the live stream (1-100)."
+    },
+    {
+      "name": "stream_palette",
+      "flag": "--palette",
+      "type": "str",
+      "default": "gray",
+      "required": false,
+      "description": "Initial live-stream palette: gray, hot, inferno or jet."
+    }
+  ],
+  "sockets": [
+    {
+      "name": "frames",
+      "type": "unix",
+      "description": "Raw 16-bit frame socket: boson_datalogger publishes, boson_mjpeg_server consumes."
+    },
+    {
+      "name": "mjpeg",
+      "type": "tcp",
+      "description": "MJPEG live stream plus /api/settings and /api/streaming. Port allocated by eventide; reachable at /proxy/flir-boson-datalogger/mjpeg/."
+    }
+  ],
+  "ui": [
+    {
+      "id": "live",
+      "type": "mjpeg",
+      "title": "BOSON LIVE",
+      "region": "center",
+      "default": true,
+      "socket": "mjpeg",
+      "path": "/stream"
+    },
+    {
+      "id": "stream-settings",
+      "type": "form",
+      "title": "BOSON STREAM",
+      "region": "sidebar",
+      "default": true,
+      "socket": "mjpeg",
+      "get": "/api/settings",
+      "put": "/api/settings",
+      "fields": [
+        {
+          "key": "quality",
+          "label": "Quality",
+          "kind": "slider",
+          "min": 1,
+          "max": 100
+        },
+        {
+          "key": "palette",
+          "label": "Palette",
+          "kind": "select",
+          "options": [
+            "gray",
+            "hot",
+            "inferno",
+            "jet"
+          ]
+        },
+        {
+          "key": "streaming",
+          "label": "Stream enabled",
+          "kind": "toggle",
+          "get": "/api/streaming",
+          "put": "/api/streaming"
+        }
+      ]
+    }
+  ],
+  "programs": [
+    {
+      "name": "boson_datalogger",
+      "command": "{venv_python} {module_dir}/boson_app.py --output-dir {recordings_subdir} --socket {socket:frames} --segment-duration {arg:segment_duration} --record-format {arg:record_format}",
+      "directory": "{module_dir}",
+      "autostart": true,
+      "autorestart": true,
+      "startretries": 10000,
+      "priority": 1,
+      "user": "root"
+    },
+    {
+      "name": "boson_mjpeg_server",
+      "command": "{venv_python} {module_dir}/boson_mjpeg_server.py --socket {socket:frames} --port {socket:mjpeg} --quality {arg:stream_quality} --palette {arg:stream_palette}",
+      "directory": "{module_dir}",
+      "autostart": true,
+      "autorestart": true,
+      "startretries": 10000,
+      "priority": 2,
+      "user": "root"
+    }
+  ]
+}

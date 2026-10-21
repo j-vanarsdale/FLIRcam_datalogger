@@ -1,0 +1,7 @@
+# Installed into this module's own virtual environment at install time
+# (see eventide-module.json and docs/MODULES.md in the eventide repo).
+#
+# flirpy brings numpy, opencv-python-headless, pyserial, pyudev and pyusb.
+# ffmpeg and libusb come from apt (declared in the manifest).
+flirpy==0.6.2
+aiohttp
